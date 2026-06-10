@@ -1,0 +1,48 @@
+# =============================================================================
+# .gitignore — Arquivos e diretórios que o Git deve IGNORAR
+# =============================================================================
+
+# Variáveis de ambiente — contém senhas e tokens!
+.env
+
+# Ambiente virtual Python
+.venv/
+venv/
+env/
+
+# Cache do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Cobertura de testes
+.coverage
+coverage.xml
+htmlcov/
+
+# Pytest
+.pytest_cache/
+
+# Ruff/mypy cache
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs locais
+*.log
+logs/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

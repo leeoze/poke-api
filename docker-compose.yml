@@ -1,0 +1,229 @@
+# =============================================================================
+# docker-compose.yml — Orquestração local de todos os serviços
+#
+# O que é o Docker Compose?
+#   Permite definir e subir múltiplos containers com um único comando.
+#   Cada serviço abaixo é um container independente que se comunica
+#   pelos nomes definidos (ex: "postgres", "redis", "kafka").
+#
+# Serviços definidos:
+#   api            → A aplicação FastAPI (nossa API)
+#   postgres       → Banco de dados relacional
+#   redis          → Cache + broker do Celery
+#   celery_worker  → Processa tarefas em background
+#   kafka          → Mensageria de eventos (modo KRaft, sem Zookeeper)
+#   elasticsearch  → Motor de busca/indexação dos logs (ELK)
+#   logstash       → Pipeline que recebe e encaminha os logs (ELK)
+#   kibana         → Dashboard visual dos logs (ELK)
+#
+# Uso:
+#   docker compose up --build -d   → sobe tudo em background
+#   docker compose ps              → status dos containers
+#   docker compose logs -f api     → logs em tempo real da API
+#   docker compose down            → para e remove containers
+#   docker compose down -v         → para, remove containers E volumes
+# =============================================================================
+
+# =============================================================================
+# Variáveis reutilizáveis via YAML anchors (&nome / *nome)
+# =============================================================================
+x-common-env: &common-env
+  DATABASE_URL:         postgresql+asyncpg://postgres:postgres@postgres:5432/pokedb
+  DATABASE_URL_SYNC:    postgresql+psycopg2://postgres:postgres@postgres:5432/pokedb
+  REDIS_URL:            redis://redis:6379/0
+  CELERY_BROKER_URL:    redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  LOGSTASH_HOST:        logstash
+  LOGSTASH_PORT:        "5044"
+  DEBUG:                "false"
+
+services:
+
+  # ── API FastAPI ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      target: runtime   # usa o stage de produção do Dockerfile multi-stage
+    container_name: poke_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"     # host:container — acesse em http://localhost:8000
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy  # aguarda o banco estar pronto
+      redis:
+        condition: service_healthy
+    networks:
+      - poke_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine   # alpine = imagem menor e mais segura
+    container_name: poke_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       pokedb
+    volumes:
+      # Volume nomeado → dados persistem mesmo após `docker compose down`
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"     # expõe para conectar com ferramentas locais (DBeaver, etc.)
+    networks:
+      - poke_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pokedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: poke_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    # allkeys-lru → quando atingir 256MB, remove as chaves menos usadas recentemente
+    # Isso evita que o Redis fique sem memória e pare de funcionar
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - poke_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Celery Worker ───────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      target: runtime
+    container_name: poke_celery
+    restart: unless-stopped
+    # Comando diferente da API: inicia o worker Celery (não o uvicorn)
+    command: celery -A src.workers.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - poke_net
+
+  # ── Apache Kafka (modo KRaft — sem Zookeeper) ───────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: poke_kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft = Kafka Raft — modo moderno sem Zookeeper
+      KAFKA_NODE_ID:                             1
+      KAFKA_PROCESS_ROLES:                       "broker,controller"
+      KAFKA_LISTENERS:                           "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS:                "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:      "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS:            "1@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES:           "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME:          "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:    1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE:           "true"
+      CLUSTER_ID:                                "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - poke_net
+
+  # ── Elasticsearch ───────────────────────────────────────────────────────────
+  # Motor de busca que armazena e indexa os logs em formato JSON
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: poke_elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type:        single-node   # sem cluster — para desenvolvimento
+      ES_JAVA_OPTS:          "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"      # sem autenticação — só para dev
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"   # API REST do Elasticsearch
+    networks:
+      - poke_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Logstash ────────────────────────────────────────────────────────────────
+  # Recebe logs da API, filtra/enriquece e envia ao Elasticsearch
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: poke_logstash
+    restart: unless-stopped
+    volumes:
+      # Monta o arquivo de configuração do pipeline
+      - ./elk-config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    ports:
+      - "5044:5044"   # porta onde a API envia os logs
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - poke_net
+
+  # ── Kibana ──────────────────────────────────────────────────────────────────
+  # Interface web para visualizar e explorar os logs
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: poke_kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+    ports:
+      - "5601:5601"   # acesse em http://localhost:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - poke_net
+
+
+# =============================================================================
+# Volumes nomeados — dados persistem entre `docker compose down` e `up`
+# =============================================================================
+volumes:
+  postgres_data:   # dados do PostgreSQL
+  redis_data:      # dados do Redis (RDB snapshots)
+  kafka_data:      # dados do Kafka (tópicos e mensagens)
+  es_data:         # dados do Elasticsearch (índices de logs)
+
+
+# =============================================================================
+# Rede interna — todos os containers se comunicam por nome de serviço
+# =============================================================================
+networks:
+  poke_net:
+    driver: bridge
+    # Exemplo: o container "api" alcança o banco pelo hostname "postgres"
+    # em vez de usar IPs (que mudam a cada restart)

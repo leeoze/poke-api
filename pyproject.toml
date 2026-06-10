@@ -1,0 +1,117 @@
+# =============================================================================
+# pyproject.toml — Gerenciador de dependências com Poetry
+#
+# O que é o Poetry?
+#   É a ferramenta moderna de gerenciamento de pacotes Python.
+#   Substitui o requirements.txt com controle preciso de versões,
+#   ambientes virtuais automáticos e separação entre dependências
+#   de produção e de desenvolvimento.
+#
+# Comandos essenciais:
+#   poetry install          → instala todas as dependências
+#   poetry install --no-dev → instala apenas produção (usado no Docker)
+#   poetry add <pacote>     → adiciona nova dependência
+#   poetry add --dev <pkg>  → adiciona dependência de desenvolvimento
+#   poetry run pytest       → executa dentro do ambiente virtual
+#   poetry shell            → ativa o shell do ambiente virtual
+# =============================================================================
+
+[tool.poetry]
+name        = "poke-api"
+version     = "2.0.0"
+description = "API RESTful estilo PokéAPI — FastAPI + PostgreSQL + Redis + Kafka + ELK"
+authors     = ["Seu Nome <seu@email.com>"]
+readme      = "README.md"
+packages    = [{ include = "src" }]
+
+# =============================================================================
+# Dependências de PRODUÇÃO — necessárias para a aplicação rodar
+# =============================================================================
+[tool.poetry.dependencies]
+python              = "^3.11"
+
+# Web framework assíncrono de alta performance
+fastapi             = "^0.111.0"
+
+# Servidor ASGI — executa a aplicação FastAPI
+uvicorn             = { version = "^0.29.0", extras = ["standard"] }
+
+# ORM assíncrono para PostgreSQL
+sqlalchemy          = { version = "^2.0.30", extras = ["asyncio"] }
+
+# Driver assíncrono do PostgreSQL (usado pelo SQLAlchemy)
+asyncpg             = "^0.29.0"
+
+# Migrações de banco de dados (evolução do schema sem perder dados)
+alembic             = "^1.13.1"
+
+# Validação de dados e schemas — v2 é muito mais rápida que v1
+pydantic            = "^2.7.1"
+
+# Permite ler variáveis de ambiente de arquivos .env
+pydantic-settings   = "^2.2.1"
+
+# Cliente Redis assíncrono (cache + broker do Celery)
+redis               = { version = "^5.0.4", extras = ["hiredis"] }
+
+# Fila de tarefas assíncronas em background
+celery              = { version = "^5.4.0", extras = ["redis"] }
+
+# Cliente Kafka assíncrono (publicação de eventos)
+aiokafka            = "^0.10.0"
+
+# Formata logs como JSON estruturado (essencial para o ELK)
+python-json-logger  = "^2.0.7"
+
+# Cliente HTTP assíncrono — usado nas tasks de download de sprites
+httpx               = "^0.27.0"
+
+# =============================================================================
+# Dependências de DESENVOLVIMENTO — só usadas localmente e no CI
+# =============================================================================
+[tool.poetry.group.dev.dependencies]
+
+# Framework de testes
+pytest              = "^8.2.0"
+
+# Plugin para executar testes async com pytest
+pytest-asyncio      = "^0.23.7"
+
+# Mede quanto do código é coberto pelos testes
+pytest-cov          = "^5.0.0"
+
+# Driver SQLite assíncrono — banco em memória usado nos testes
+aiosqlite           = "^0.20.0"
+
+# Permite verificação de tipos estáticos
+mypy                = "^1.10.0"
+
+# Formata o código automaticamente
+ruff                = "^0.4.0"
+
+# =============================================================================
+# Configuração do pytest
+# =============================================================================
+[tool.pytest.ini_options]
+# Modo "auto" = qualquer função async com pytest é tratada como teste assíncrono
+asyncio_mode = "auto"
+# Onde procurar os testes
+testpaths    = ["tests"]
+
+# =============================================================================
+# Configuração do Ruff (linter + formatter)
+# =============================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E = erros de estilo, F = erros de import, I = ordenação de imports
+select = ["E", "F", "I"]
+
+# =============================================================================
+# Build backend — necessário para o Poetry funcionar
+# =============================================================================
+[build-system]
+requires      = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

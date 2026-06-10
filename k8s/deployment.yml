@@ -1,0 +1,156 @@
+# =============================================================================
+# k8s/deployment.yml — Manifesto de Deployment do Kubernetes
+#
+# O que é o Kubernetes?
+#   É um orquestrador de containers. Enquanto o Docker Compose é para
+#   desenvolvimento local, o Kubernetes (K8s) é para produção em escala.
+#
+# O que é um Deployment?
+#   Define COMO a aplicação deve ser executada:
+#   • Quantas réplicas (cópias) do container rodar
+#   • Qual imagem Docker usar
+#   • Variáveis de ambiente
+#   • Recursos de CPU/memória
+#   • Verificações de saúde (health checks)
+#   • Como atualizar sem downtime (rolling update)
+#
+# Comandos úteis:
+#   kubectl apply -f k8s/               → aplica todos os manifestos
+#   kubectl get pods                    → lista os pods rodando
+#   kubectl logs <pod-name>             → logs de um pod
+#   kubectl describe pod <pod-name>     → detalhes de um pod
+#   kubectl rollout status deploy/poke-api → status do deploy
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poke-api
+  namespace: default
+  labels:
+    app: poke-api
+    version: "2.0.0"
+spec:
+  # Número de réplicas (cópias) da aplicação rodando simultaneamente
+  # 3 réplicas = alta disponibilidade (se 1 cair, 2 ainda atendem)
+  replicas: 3
+
+  # Define como o K8s identifica quais pods gerenciar
+  selector:
+    matchLabels:
+      app: poke-api
+
+  # Estratégia de atualização sem downtime
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge:       1  # sobe 1 pod novo antes de derrubar o antigo
+      maxUnavailable: 0  # nunca deixa nenhum pod indisponível durante update
+
+  # Template dos Pods (cada réplica segue este template)
+  template:
+    metadata:
+      labels:
+        app: poke-api
+    spec:
+      containers:
+        - name:  poke-api
+          image: seu-usuario/poke-api:latest   # ← substitua pelo seu registry
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+
+          # Variáveis de ambiente — lidas de Secrets e ConfigMaps
+          env:
+            # Secrets = dados sensíveis (senhas, tokens) — nunca em texto claro
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: poke-api-secrets
+                  key:  database-url
+
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: poke-api-secrets
+                  key:  redis-url
+
+            # ConfigMaps = configurações não-sensíveis
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: poke-api-config
+                  key:  kafka-bootstrap-servers
+
+            - name: DEBUG
+              valueFrom:
+                configMapKeyRef:
+                  name: poke-api-config
+                  key:  debug
+
+          # Limites de recursos — evita que um pod consuma toda a CPU/RAM do nó
+          resources:
+            requests:
+              # Mínimo garantido ao pod quando o K8s está decidindo onde colocá-lo
+              cpu:    "250m"    # 250 milicores = 25% de 1 CPU
+              memory: "256Mi"   # 256 Megabytes
+            limits:
+              # Máximo permitido — pod é morto se ultrapassar memória
+              cpu:    "500m"
+              memory: "512Mi"
+
+          # Liveness Probe — o K8s reinicia o pod se este check falhar
+          # "A aplicação está viva?" — responde ao /health
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20   # aguarda 20s após iniciar
+            periodSeconds:       20   # verifica a cada 20s
+            failureThreshold:    3    # reinicia após 3 falhas seguidas
+
+          # Readiness Probe — o K8s só envia tráfego quando este check passar
+          # "A aplicação está pronta para receber requisições?"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds:       10
+            failureThreshold:    3
+
+      # Tempo máximo para encerrar graciosamente (SIGTERM → espera → SIGKILL)
+      terminationGracePeriodSeconds: 30
+
+---
+# =============================================================================
+# ConfigMap — configurações não-sensíveis
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poke-api-config
+  namespace: default
+data:
+  kafka-bootstrap-servers: "kafka-service:9092"
+  debug: "false"
+
+---
+# =============================================================================
+# NOTA SOBRE SECRETS:
+# Nunca commite secrets no Git! Use um dos métodos abaixo:
+#
+# Opção 1 — kubectl manual (simples):
+#   kubectl create secret generic poke-api-secrets \
+#     --from-literal=database-url='postgresql+asyncpg://user:pass@host/db' \
+#     --from-literal=redis-url='redis://redis-service:6379/0'
+#
+# Opção 2 — Sealed Secrets (recomendado para GitOps):
+#   Instale o controller e use kubeseal para criptografar os secrets
+#   antes de commitar no repositório.
+#
+# Opção 3 — External Secrets Operator:
+#   Integra com AWS Secrets Manager, HashiCorp Vault, etc.
+# =============================================================================
